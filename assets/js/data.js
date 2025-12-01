@@ -92,13 +92,23 @@ document.addEventListener("DOMContentLoaded", () => {
                     data = [];
                 }
 
+                console.log(`API returned ${data.length} entries`);
+                
                 // Sort and display data (include entries with 0 wagerAmount too)
                 const sorted = data
                     .filter((player) => player && typeof player?.wagerAmount === "number")
                     .sort((a, b) => b.wagerAmount - a.wagerAmount)
                     .slice(0, MAX_PLAYERS);
                 
-                console.log(`Loaded ${sorted.length} players from API`);
+                console.log(`Displaying ${sorted.length} players (sorted by wagerAmount)`);
+                
+                // Log if no data
+                if (sorted.length === 0) {
+                    console.warn("No leaderboard data available. This could mean:");
+                    console.warn("1. No wagers in the specified time period (Dec 1-30, 2025)");
+                    console.warn("2. API rate limit (1 request every 10 seconds)");
+                    console.warn("3. No referees found");
+                }
 
                 // Update all player slots (fill with empty if no data)
                 for (let index = 0; index < MAX_PLAYERS; index++) {
