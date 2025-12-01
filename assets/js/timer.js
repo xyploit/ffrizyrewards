@@ -1,5 +1,6 @@
-// Define target date in UTC (convert from MST manually)
-const targetDate = new Date(Date.UTC(2025, 10, 30, 18 + 7, 59, 59)); // MST = UTC-7, adding 7 hours to convert
+// Define target date: December 30, 2025 at 23:59:59 UTC
+// Month 11 = December (0-indexed, so 11 = December)
+const targetDate = new Date(Date.UTC(2025, 11, 30, 23, 59, 59)); // December 30, 2025
 
 function calculateTimeRemaining() {
   const nowUTC = new Date(); // Get current UTC time
@@ -7,7 +8,7 @@ function calculateTimeRemaining() {
 
   if (difference <= 0) {
     clearInterval(timerInterval);
-    document.getElementById('timer').innerHTML = 'Countdown expired!';
+    document.getElementById('countdown').innerHTML = '00D 00H 00M 00S';
     return;
   }
 
@@ -16,7 +17,7 @@ function calculateTimeRemaining() {
   const minutes = Math.floor((difference % (1000 * 60 * 60)) / (1000 * 60));
   const seconds = Math.floor((difference % (1000 * 60)) / 1000);
 
-  document.getElementById('countdown').innerHTML = `${days}D ${hours}H ${minutes}M ${seconds}S`;
+  document.getElementById('countdown').innerHTML = `${String(days).padStart(2, '0')}D ${String(hours).padStart(2, '0')}H ${String(minutes).padStart(2, '0')}M ${String(seconds).padStart(2, '0')}S`;
 }
 
 // Calculate initial time remaining
