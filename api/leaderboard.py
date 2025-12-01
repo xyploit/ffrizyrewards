@@ -11,7 +11,7 @@ API_URL = os.environ.get(
     "SHUFFLE_STATS_URL",
     "https://affiliate.shuffle.com/stats/96cc7e48-64b2-4120-b07d-779f3a9fd870",
 )
-API_TIMEOUT = float(os.environ.get("SHUFFLE_STATS_TIMEOUT", "8"))
+API_TIMEOUT = float(os.environ.get("SHUFFLE_STATS_TIMEOUT", "5"))  # 5 second timeout
 SESSION = requests.Session()
 
 app = Flask(__name__)
@@ -20,11 +20,6 @@ app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 # Leaderboard end time (set via API)
 _leaderboard_end_time: Optional[datetime] = None
 _end_time_lock = threading.Lock()
-
-# Baseline wagers storage (to calculate new wagers only)
-_baseline_wagers: Dict[str, float] = {}  # username -> wagerAmount
-_baseline_lock = threading.Lock()
-_baseline_set = False
 
 
 def mask_username(username: str) -> str:
@@ -47,16 +42,18 @@ def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[
     Fetch leaderboard data directly from Shuffle API.
     Uses startTime and endTime to reset wager count - only counts wagers within this period.
     Returns the raw data from the API.
+    Tries multiple approaches if first attempt returns empty data.
     """
     # Build URL with time parameters to reset wagers
     # startTime and endTime reset wagers to $0, only counting wagers from Dec 1-30, 2025
     url = API_URL
     params = {}
     if start_time:
-        params["startTime"] = start_time  # Timestamp in milliseconds
+        params["startTime"] = str(start_time)  # Ensure string format, timestamp in milliseconds
     if end_time:
-        params["endTime"] = end_time  # Timestamp in milliseconds
+        params["endTime"] = str(end_time)  # Ensure string format, timestamp in milliseconds
     
+    # Try fetching with provided parameters first
     try:
         app.logger.info(f"Fetching from Shuffle API: {url} with params: {params}")
         response = SESSION.get(url, params=params, timeout=API_TIMEOUT)
@@ -65,9 +62,9 @@ def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[
         if response.status_code == 400:
             error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
             if error_data.get('message') == 'TOO_MANY_REQUEST':
-                app.logger.warning("Rate limit exceeded: TOO_MANY_REQUEST - will retry")
-                # Return empty array instead of raising to allow retry
-                return []
+                app.logger.warning("Rate limit exceeded: TOO_MANY_REQUEST")
+                # Try without params as fallback
+                return fetch_without_time_params()
         
         response.raise_for_status()
         payload = response.json()
@@ -76,11 +73,40 @@ def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[
             app.logger.error(f"Unexpected payload format from upstream API: {type(payload)}")
             return []
         
-        app.logger.info(f"Successfully fetched {len(payload)} entries from Shuffle API")
-        return payload
+        # If we got data, return it
+        if payload and len(payload) > 0:
+            app.logger.info(f"Successfully fetched {len(payload)} entries from Shuffle API with time params")
+            return payload
+        else:
+            # Empty data, try fallback without time params
+            app.logger.warning("Empty data received with time params, trying fallback...")
+            return fetch_without_time_params()
         
     except requests.RequestException as exc:
         app.logger.error(f"Failed to fetch upstream leaderboard: {exc}", exc_info=True)
+        # Try fallback without time params
+        return fetch_without_time_params()
+
+
+def fetch_without_time_params() -> List[Dict[str, Any]]:
+    """
+    Fallback: Fetch data without time parameters to get all data.
+    """
+    try:
+        app.logger.info(f"Fallback: Fetching from Shuffle API without time params: {API_URL}")
+        response = SESSION.get(API_URL, timeout=API_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        
+        if not isinstance(payload, list):
+            app.logger.error(f"Unexpected payload format: {type(payload)}")
+            return []
+        
+        app.logger.info(f"Fallback: Successfully fetched {len(payload)} entries without time params")
+        return payload
+        
+    except requests.RequestException as exc:
+        app.logger.error(f"Fallback fetch also failed: {exc}", exc_info=True)
         return []
 
 
@@ -99,10 +125,11 @@ def is_leaderboard_ended() -> bool:
 @app.route("/api/leaderboard", methods=["GET"])
 def leaderboard():
     """
-    Fetch leaderboard data directly from Shuffle API.
-    JUGAD: Fetches current total wagers, stores baseline, and shows only NEW wagers.
+    Fetch leaderboard data directly from Shuffle API on every request.
+    Supports startTime and endTime query parameters.
+    Usernames are masked for privacy.
     """
-    global _leaderboard_end_time, _baseline_wagers, _baseline_set
+    global _leaderboard_end_time
     
     start_time = request.args.get("startTime")
     end_time = request.args.get("endTime")
@@ -121,90 +148,34 @@ def leaderboard():
         except (ValueError, OSError) as e:
             app.logger.warning(f"Invalid endTime format: {end_time}, error: {e}")
     
-    # JUGAD: Fetch CURRENT total wagers (without time params to get all data)
-    # Retry logic: try up to 2 times if first fetch fails or returns empty
-    current_data = []
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            current_data = fetch_leaderboard_data(start_time=None, end_time=None)
-            # Ensure data is always a list
-            if not isinstance(current_data, list):
-                app.logger.error(f"Data is not a list: {type(current_data)}")
-                current_data = []
-            
-            # If we got data, break out of retry loop
-            if current_data and len(current_data) > 0:
-                break
-            elif attempt < max_retries - 1:
-                app.logger.warning(f"Empty data received, retrying... (attempt {attempt + 1}/{max_retries})")
-                import time
-                time.sleep(0.5)  # Small delay before retry
-        except Exception as e:
-            app.logger.error(f"Error fetching leaderboard data (attempt {attempt + 1}): {e}", exc_info=True)
-            if attempt < max_retries - 1:
-                import time
-                time.sleep(0.5)  # Small delay before retry
-            else:
-                current_data = []
+    # ALWAYS fetch directly from Shuffle API
+    try:
+        data = fetch_leaderboard_data(start_time=start_time, end_time=end_time)
+    except Exception as e:
+        app.logger.error(f"Error fetching leaderboard data: {e}", exc_info=True)
+        data = []
     
-    # Set baseline ONCE on first fetch when startTime is provided (leaderboard start)
-    # This captures the wager amounts at the start of the leaderboard period
-    # CRITICAL: Baseline must NEVER be updated after initial set, otherwise wagers reset to 0
-    if start_time and not _baseline_set:
-        with _baseline_lock:
-            # Double-check inside lock to prevent race condition
-            if not _baseline_set and current_data and len(current_data) > 0:
-                for entry in current_data:
-                    if isinstance(entry, dict):
-                        username = entry.get("username", "")
-                        wager_amount = float(entry.get("wagerAmount", 0) or 0)
-                        # ONLY set baseline if not already set for this user
-                        if username not in _baseline_wagers:
-                            _baseline_wagers[username] = wager_amount
-                _baseline_set = True
-                app.logger.info(f"Baseline wagers SET ONCE: {len(_baseline_wagers)} users - will NEVER update again")
-            elif not _baseline_set:
-                # If no data but baseline not set, mark as set to avoid repeated attempts
-                _baseline_set = True
-                app.logger.warning("No data received on first fetch, baseline marked as set")
+    # Ensure data is always a list
+    if not isinstance(data, list):
+        app.logger.error(f"Data is not a list: {type(data)}")
+        data = []
     
-    # Calculate NEW wagers only (current - baseline)
-    # Always return data even if empty to ensure frontend receives consistent response
+    # Process and mask usernames
+    # Include ALL entries even if wagerAmount is 0
     simplified = []
-    with _baseline_lock:
-        if current_data and len(current_data) > 0:
-            for entry in current_data:
-                if isinstance(entry, dict):
-                    username = entry.get("username", "")
-                    current_wager = float(entry.get("wagerAmount", 0) or 0)
-                    
-                    # If baseline is set and user not in baseline, add them with current wager as baseline
-                    # This allows new users to join the leaderboard starting from 0
-                    if _baseline_set and username not in _baseline_wagers:
-                        _baseline_wagers[username] = current_wager
-                        app.logger.info(f"New user added to baseline: {mask_username(username)} with baseline {current_wager}")
-                    
-                    baseline_wager = _baseline_wagers.get(username, 0.0)
-                    new_wager = max(0, current_wager - baseline_wager)  # Only show positive new wagers
-                    
-                    simplified.append({
-                        "username": mask_username(username),
-                        "wagerAmount": new_wager,
-                    })
-        else:
-            # If no current data but we have baseline, return baseline users with 0 wagers
-            if _baseline_set and len(_baseline_wagers) > 0:
-                for username in _baseline_wagers.keys():
-                    simplified.append({
-                        "username": mask_username(username),
-                        "wagerAmount": 0.0,
-                    })
-                app.logger.info("No current data, returning baseline users with 0 wagers")
+    for entry in data:
+        if isinstance(entry, dict):
+            username = entry.get("username", "")
+            wager_amount = float(entry.get("wagerAmount", 0) or 0)
+            # Include entry even if wagerAmount is 0
+            simplified.append({
+                "username": mask_username(username),
+                "wagerAmount": wager_amount,
+            })
     
-    app.logger.info(f"Returning {len(simplified)} leaderboard entries (new wagers only)")
+    app.logger.info(f"Returning {len(simplified)} leaderboard entries")
     
-    # Always return data array, even if empty
+    # Add metadata about whether leaderboard has ended
     response_data = {
         "data": simplified,
         "ended": is_leaderboard_ended()
