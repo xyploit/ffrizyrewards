@@ -211,20 +211,20 @@ def leaderboard():
             else:
                 data = _data_store["weekly"][cache_key]
         else:
-            # Lifetime data - always use cached data from background polling
-            # Background polling already uses endTime parameter to limit wagers
-            data = _data_store["lifetime"]
+            # Lifetime data (from background polling)
+            # Always use endTime parameter when fetching to limit wagers to leaderboard period
+            with _end_time_lock:
+                end_time_str = None
+                if _leaderboard_end_time:
+                    end_time_str = str(int(_leaderboard_end_time.timestamp() * 1000))
             
-            # If we have no cached data or leaderboard has ended, fetch fresh data with endTime
-            if (not data or len(data) == 0) or is_leaderboard_ended():
+            # If leaderboard has ended or we have no cached data, fetch fresh data with endTime
+            with _data_lock:
+                cached_data = _data_store.get("lifetime", [])
+            
+            if is_leaderboard_ended() or not cached_data or len(cached_data) == 0:
+                # Fetch fresh data with endTime to ensure we only count wagers up to end time
                 try:
-                    with _end_time_lock:
-                        end_time_str = None
-                        if _leaderboard_end_time:
-                            # Use endTime to only count wagers up to leaderboard end
-                            end_time_str = str(int(_leaderboard_end_time.timestamp() * 1000))
-                    
-                    # Fetch fresh data with endTime parameter
                     fresh_data = fetch_leaderboard_data(end_time=end_time_str)
                     with _data_lock:
                         _data_store["lifetime"] = fresh_data
@@ -232,8 +232,10 @@ def leaderboard():
                 except Exception as e:
                     app.logger.error(f"Error fetching leaderboard data: {e}")
                     # Use cached data as fallback
-                    if not data or len(data) == 0:
-                        data = _data_store.get("lifetime", [])
+                    data = cached_data if cached_data else []
+            else:
+                # Use cached data
+                data = cached_data
     
     if not isinstance(data, list):
         abort(502, description="Unexpected data format")
