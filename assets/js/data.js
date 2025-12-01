@@ -3,7 +3,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const MAX_PLAYERS = 10;
     let refreshInterval = null;
     let leaderboardEnded = false;
-    let lastGoodData = []; // Store last known good data - only update UI when we get actual data
 
     // Get URL parameters to check if viewing a specific day
     const urlParams = new URLSearchParams(window.location.search);
@@ -50,44 +49,26 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     };
 
-    // Function to display data on UI
-    const displayLeaderboardData = (sortedData) => {
-        for (let index = 0; index < MAX_PLAYERS; index++) {
-            const nameEl = document.getElementById(`user${index}_name`);
-            const wagerEl = document.getElementById(`user${index}_wager`);
-
-            if (!nameEl || !wagerEl) {
-                continue;
-            }
-
-            if (index < sortedData.length && sortedData[index]) {
-                const player = sortedData[index];
-                // Username is already masked by the backend API
-                nameEl.textContent = player.username || "User";
-                wagerEl.textContent = formatCurrency(player.wagerAmount);
-            } else {
-                // Show placeholder if no data for this rank
-                nameEl.textContent = "----";
-                wagerEl.textContent = "----";
-            }
-        }
-    };
-
     const updateLeaderboard = () => {
         // Build URL with startTime and endTime parameters in exact format
         // Format: startTime=1764591959590&endTime=1767139199000 (milliseconds timestamps)
+        // Add timestamp to prevent caching and ensure fresh data
         const url = new URL(API_URL, window.location.origin);
         url.searchParams.set("startTime", startTime.toString());
         url.searchParams.set("endTime", endTime.toString());
+        url.searchParams.set("_t", Date.now().toString()); // Cache buster - ensures fresh data
         
-        console.log(`Fetching leaderboard: ${url.toString()}`);
-        console.log(`Timestamps: startTime=${startTime}, endTime=${endTime}`);
+        console.log(`[${new Date().toLocaleTimeString()}] Fetching fresh leaderboard data`);
+        console.log(`URL: ${url.toString()}`);
+        console.log(`Timestamps: startTime=${startTime} (Dec 1, 2025), endTime=${endTime} (Dec 30, 2025)`);
 
-        // Fetch with no cache for fresh data
+        // Fetch with no cache for fresh data - always get latest
         fetch(url, { 
             cache: "no-store",
             headers: {
-                'Cache-Control': 'no-cache'
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
             }
         })
             .then((response) => {
@@ -116,65 +97,61 @@ document.addEventListener("DOMContentLoaded", () => {
                     data = [];
                 }
 
-                console.log(`API returned ${data.length} entries`);
-                
-                // JUGAD: Only update frontend if API actually returned data
-                // If API returns empty, keep showing last good data
-                if (!data || data.length === 0) {
-                    console.warn("API returned empty data - keeping last known good data visible");
-                    console.warn("This could mean:");
-                    console.warn("1. API rate limit (1 request every 10 seconds)");
-                    console.warn("2. Temporary API issue");
-                    console.warn("3. No wagers in the specified time period");
-                    // Don't update UI - keep showing lastGoodData
-                    return;
-                }
+                console.log(`✅ API returned ${data.length} entries (fresh data from Dec 1-30, 2025)`);
                 
                 // Sort and display data (include entries with 0 wagerAmount too)
+                // Always show latest data - no caching
                 const sorted = data
                     .filter((player) => player && typeof player?.wagerAmount === "number")
                     .sort((a, b) => b.wagerAmount - a.wagerAmount)
                     .slice(0, MAX_PLAYERS);
                 
-                // Only update if we got actual data
-                if (sorted.length > 0) {
-                    // Store this as last good data
-                    lastGoodData = sorted;
-                    console.log(`✅ Updating UI with ${sorted.length} players (sorted by wagerAmount)`);
-                    
-                    // Update UI with new data
-                    displayLeaderboardData(sorted);
+                console.log(`📊 Displaying ${sorted.length} players (sorted by wagerAmount, latest data only)`);
+                
+                // Log if no data
+                if (sorted.length === 0) {
+                    console.warn("⚠️ No leaderboard data available. Possible reasons:");
+                    console.warn("1. No wagers in Dec 1-30, 2025 period");
+                    console.warn("2. API rate limit (waiting 12+ seconds between requests)");
+                    console.warn("3. No referees found");
+                    console.warn("4. API temporarily unavailable");
                 } else {
-                    console.warn("Sorted data is empty - keeping last known good data");
-                    // If we have last good data, keep showing it
-                    if (lastGoodData.length > 0) {
-                        console.log("Displaying last known good data");
-                        displayLeaderboardData(lastGoodData);
+                    console.log(`✅ Successfully displaying ${sorted.length} players with latest wager data`);
+                }
+
+                // Update all player slots (fill with empty if no data)
+                for (let index = 0; index < MAX_PLAYERS; index++) {
+                    const nameEl = document.getElementById(`user${index}_name`);
+                    const wagerEl = document.getElementById(`user${index}_wager`);
+
+                    if (!nameEl || !wagerEl) {
+                        continue;
+                    }
+
+                    if (index < sorted.length && sorted[index]) {
+                        const player = sorted[index];
+                        // Username is already masked by the backend API
+                        nameEl.textContent = player.username || "User";
+                        wagerEl.textContent = formatCurrency(player.wagerAmount);
+                    } else {
+                        // Show placeholder if no data for this rank
+                        nameEl.textContent = "----";
+                        wagerEl.textContent = "----";
                     }
                 }
             })
             .catch((error) => {
                 console.error("Failed to load leaderboard data:", error);
-                console.warn("Keeping last known good data visible due to API error");
-                // Don't clear UI on error - keep showing lastGoodData
             });
     };
 
     // Initial load immediately
-    // On first load, if no data, show placeholders
     updateLeaderboard();
-    
-    // If initial load fails and we have no data, show placeholders after a delay
-    setTimeout(() => {
-        if (lastGoodData.length === 0) {
-            console.log("Initial load completed - showing placeholders");
-            displayLeaderboardData([]);
-        }
-    }, 2000); // Wait 2 seconds for initial load
 
-    // Refresh every 10 seconds for faster updates
-    // Continue refreshing even after leaderboard ends to show final data
+    // Refresh every 12 seconds to avoid rate limiting
+    // API allows 1 request every 10 seconds, so 12 seconds gives buffer
+    // Always fetch fresh data with exact startTime/endTime - no caching
     refreshInterval = setInterval(() => {
         updateLeaderboard();
-    }, 10000); // 10 seconds for faster updates
+    }, 12000); // 12 seconds to avoid rate limit (API: 1 req per 10 sec)
 });
