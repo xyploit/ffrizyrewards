@@ -40,15 +40,17 @@ def mask_username(username: str) -> str:
 def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Fetch leaderboard data directly from Shuffle API.
+    Uses startTime and endTime to reset wager count - only counts wagers within this period.
     Returns the raw data from the API.
     """
-    # Build URL with optional time parameters
+    # Build URL with time parameters to reset wagers
+    # startTime and endTime reset wagers to $0, only counting wagers from Dec 1-30, 2025
     url = API_URL
     params = {}
     if start_time:
-        params["startTime"] = start_time
+        params["startTime"] = start_time  # Timestamp in milliseconds
     if end_time:
-        params["endTime"] = end_time
+        params["endTime"] = end_time  # Timestamp in milliseconds
     
     try:
         app.logger.info(f"Fetching from Shuffle API: {url} with params: {params}")
