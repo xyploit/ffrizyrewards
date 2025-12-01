@@ -119,6 +119,7 @@ def is_leaderboard_ended() -> bool:
 def poll_leaderboard_background():
     """
     Background thread that polls the API every 20 seconds and stores the data.
+    Uses endTime parameter when fetching to only count wagers up to that point.
     Stops polling after the leaderboard end time.
     """
     app.logger.info("Starting background polling thread")
@@ -130,14 +131,16 @@ def poll_leaderboard_background():
                 app.logger.info("Leaderboard has ended. Stopping background polling.")
                 break
             
-            # Poll lifetime data (only if endTime is not set, otherwise use endTime)
+            # Poll lifetime data with endTime to limit wagers to leaderboard period
             try:
                 with _end_time_lock:
                     end_time_str = None
                     if _leaderboard_end_time:
                         # Convert to ISO format timestamp (milliseconds)
+                        # Use endTime to only count wagers up to the leaderboard end
                         end_time_str = str(int(_leaderboard_end_time.timestamp() * 1000))
                 
+                # Always use endTime when fetching to limit wagers to leaderboard period
                 lifetime_data = fetch_leaderboard_data(end_time=end_time_str)
                 with _data_lock:
                     _data_store["lifetime"] = lifetime_data
@@ -211,9 +214,12 @@ def leaderboard():
                 data = _data_store["weekly"][cache_key]
         else:
             # Lifetime data (from background polling)
-            # If leaderboard has ended, use the endTime when fetching
-            if is_leaderboard_ended():
-                # Leaderboard has ended, fetch final data with endTime
+            # After leaderboard ends, just return the cached data (no new fetching)
+            # The cached data already has wagers limited to endTime from background polling
+            data = _data_store["lifetime"]
+            
+            # If leaderboard has ended and we have no cached data, try to fetch final data once
+            if is_leaderboard_ended() and (not data or len(data) == 0):
                 try:
                     with _end_time_lock:
                         end_time_str = None
@@ -225,13 +231,9 @@ def leaderboard():
                         with _data_lock:
                             _data_store["lifetime"] = final_data
                         data = final_data
-                    else:
-                        data = _data_store["lifetime"]
                 except Exception as e:
                     app.logger.error(f"Error fetching final leaderboard data: {e}")
-                    data = _data_store["lifetime"]  # Fallback to cached data
-            else:
-                data = _data_store["lifetime"]
+                    # Keep using cached data even if empty
     
     if not isinstance(data, list):
         abort(502, description="Unexpected data format")
