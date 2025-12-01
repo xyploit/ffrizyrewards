@@ -9,13 +9,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const dayParam = urlParams.get('day'); // e.g., ?day=1 for December 1st
 
     // Default leaderboard period: December 1, 2025 to December 30, 2025
-    // This resets wagers to $0 and only counts from Dec 1-30
+    // Calculate exact millisecond timestamps like: startTime=1764591959590&endTime=1767139199000
     const defaultStartDate = new Date(Date.UTC(2025, 11, 1, 0, 0, 0)); // December 1, 2025 00:00:00 UTC
-    const defaultStartTime = defaultStartDate.getTime();
+    const defaultStartTime = defaultStartDate.getTime(); // Milliseconds timestamp
     
     // End: December 30, 2025 at 23:59:59 UTC
     const endDate = new Date(Date.UTC(2025, 11, 30, 23, 59, 59)); // December 30, 2025
-    const defaultEndTime = endDate.getTime();
+    const defaultEndTime = endDate.getTime(); // Milliseconds timestamp
+    
+    console.log(`Using timestamps: startTime=${defaultStartTime}, endTime=${defaultEndTime}`);
 
     // If day parameter is provided (e.g., ?day=1), show data for that specific day
     let startTime, endTime;
@@ -48,11 +50,14 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     const updateLeaderboard = () => {
-        // Build URL with startTime and endTime parameters
-        // This resets wagers to $0 and only counts wagers from Dec 1-30, 2025
+        // Build URL with startTime and endTime parameters in exact format
+        // Format: startTime=1764591959590&endTime=1767139199000 (milliseconds timestamps)
         const url = new URL(API_URL, window.location.origin);
         url.searchParams.set("startTime", startTime.toString());
         url.searchParams.set("endTime", endTime.toString());
+        
+        console.log(`Fetching leaderboard: ${url.toString()}`);
+        console.log(`Timestamps: startTime=${startTime}, endTime=${endTime}`);
 
         // Fetch with no cache for fresh data
         fetch(url, { 
@@ -87,17 +92,13 @@ document.addEventListener("DOMContentLoaded", () => {
                     data = [];
                 }
 
-                // Always ensure data is an array
-                if (!Array.isArray(data)) {
-                    console.warn("Data is not an array, using empty array");
-                    data = [];
-                }
-
                 // Sort and display data (include entries with 0 wagerAmount too)
                 const sorted = data
                     .filter((player) => player && typeof player?.wagerAmount === "number")
                     .sort((a, b) => b.wagerAmount - a.wagerAmount)
                     .slice(0, MAX_PLAYERS);
+                
+                console.log(`Loaded ${sorted.length} players from API`);
 
                 // Update all player slots (fill with empty if no data)
                 for (let index = 0; index < MAX_PLAYERS; index++) {
