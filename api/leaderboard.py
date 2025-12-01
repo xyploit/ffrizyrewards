@@ -1,12 +1,10 @@
 import os
-import time
 import threading
-from datetime import timedelta, datetime
-from collections import deque
-from typing import Optional, Dict, List, Any
+from datetime import datetime
+from typing import Optional, List, Any, Dict
 
 import requests
-from flask import Flask, jsonify, abort, request
+from flask import Flask, jsonify, request
 
 
 API_URL = os.environ.get(
@@ -16,29 +14,12 @@ API_URL = os.environ.get(
 API_TIMEOUT = float(os.environ.get("SHUFFLE_STATS_TIMEOUT", "8"))
 SESSION = requests.Session()
 
-# Rate limiting: 1 call every 30 seconds
-RATE_LIMIT_SECONDS = 30
-# Polling interval: every 20 seconds as per documentation
-POLLING_INTERVAL_SECONDS = 20
-
 app = Flask(__name__)
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
-# Data storage for polled data
-# Structure: { "lifetime": [...], "weekly": { "startTime_endTime": [...] } }
-_data_store: Dict[str, Any] = {
-    "lifetime": [],
-    "weekly": {}
-}
-_data_lock = threading.Lock()
-
-# Leaderboard end time (set via environment variable or API)
+# Leaderboard end time (set via API)
 _leaderboard_end_time: Optional[datetime] = None
 _end_time_lock = threading.Lock()
-
-# Rate limiting tracking
-_last_api_call_time: Optional[float] = None
-_rate_limit_lock = threading.Lock()
 
 
 def mask_username(username: str) -> str:
@@ -58,52 +39,42 @@ def mask_username(username: str) -> str:
 
 def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Fetch leaderboard data from Shuffle API with rate limiting.
+    Fetch leaderboard data directly from Shuffle API.
     Returns the raw data from the API.
     """
-    global _last_api_call_time
+    # Build URL with optional time parameters
+    url = API_URL
+    params = {}
+    if start_time:
+        params["startTime"] = start_time
+    if end_time:
+        params["endTime"] = end_time
     
-    # Rate limiting check
-    with _rate_limit_lock:
-        current_time = time.time()
-        if _last_api_call_time is not None:
-            time_since_last_call = current_time - _last_api_call_time
-            if time_since_last_call < RATE_LIMIT_SECONDS:
-                wait_time = RATE_LIMIT_SECONDS - time_since_last_call
-                app.logger.warning(f"Rate limit: waiting {wait_time:.1f} seconds before next API call")
-                time.sleep(wait_time)
+    try:
+        app.logger.info(f"Fetching from Shuffle API: {url} with params: {params}")
+        response = SESSION.get(url, params=params, timeout=API_TIMEOUT)
         
-        # Build URL with optional time parameters
-        url = API_URL
-        params = {}
-        if start_time:
-            params["startTime"] = start_time
-        if end_time:
-            params["endTime"] = end_time
-        
-        try:
-            response = SESSION.get(url, params=params, timeout=API_TIMEOUT)
-            
-            # Handle rate limit error
-            if response.status_code == 400:
-                error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
-                if error_data.get('message') == 'TOO_MANY_REQUEST':
-                    app.logger.error("Rate limit exceeded: TOO_MANY_REQUEST")
-                    raise requests.RequestException("Rate limit exceeded: TOO_MANY_REQUEST")
-            
-            response.raise_for_status()
-            payload = response.json()
-            _last_api_call_time = time.time()
-            
-            if not isinstance(payload, list):
-                app.logger.error("Unexpected payload format from upstream API")
+        # Handle rate limit error
+        if response.status_code == 400:
+            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+            if error_data.get('message') == 'TOO_MANY_REQUEST':
+                app.logger.warning("Rate limit exceeded: TOO_MANY_REQUEST - will retry")
+                # Return empty array instead of raising to allow retry
                 return []
-            
-            return payload
-            
-        except requests.RequestException as exc:
-            app.logger.error("Failed to fetch upstream leaderboard: %s", exc, exc_info=True)
-            raise
+        
+        response.raise_for_status()
+        payload = response.json()
+        
+        if not isinstance(payload, list):
+            app.logger.error(f"Unexpected payload format from upstream API: {type(payload)}")
+            return []
+        
+        app.logger.info(f"Successfully fetched {len(payload)} entries from Shuffle API")
+        return payload
+        
+    except requests.RequestException as exc:
+        app.logger.error(f"Failed to fetch upstream leaderboard: {exc}", exc_info=True)
+        return []
 
 
 def is_leaderboard_ended() -> bool:
@@ -116,64 +87,14 @@ def is_leaderboard_ended() -> bool:
         return datetime.utcnow() >= _leaderboard_end_time
 
 
-def poll_leaderboard_background():
-    """
-    Background thread that polls the API every 20 seconds and stores the data.
-    Always uses endTime parameter when fetching to only count wagers up to that point.
-    Continues polling even after leaderboard ends to keep data fresh.
-    """
-    app.logger.info("Starting background polling thread")
-    
-    while True:
-        try:
-            # Poll lifetime data - always use endTime if set to limit wagers to leaderboard period
-            try:
-                with _end_time_lock:
-                    end_time_str = None
-                    if _leaderboard_end_time:
-                        # Convert to timestamp (milliseconds) - this limits wagers to only count up to end time
-                        end_time_str = str(int(_leaderboard_end_time.timestamp() * 1000))
-                
-                # Always fetch with endTime to ensure we only count wagers up to that point
-                lifetime_data = fetch_leaderboard_data(end_time=end_time_str)
-                with _data_lock:
-                    _data_store["lifetime"] = lifetime_data
-                
-                if is_leaderboard_ended():
-                    app.logger.info(f"Updated leaderboard data (ended): {len(lifetime_data)} entries (wagers limited to end time)")
-                else:
-                    app.logger.info(f"Updated lifetime leaderboard data: {len(lifetime_data)} entries")
-            except Exception as e:
-                app.logger.error(f"Error polling lifetime data: {e}")
-            
-            # Wait 20 seconds before next poll
-            time.sleep(POLLING_INTERVAL_SECONDS)
-            
-        except Exception as e:
-            app.logger.error(f"Error in background polling thread: {e}")
-            time.sleep(POLLING_INTERVAL_SECONDS)
-
-
-@app.after_request
-def add_cache_headers(response):
-    """
-    Allow short-lived caching on the API to avoid hammering Shuffle's endpoint.
-    """
-    if response.direct_passthrough or response.status_code != 200:
-        return response
-    response.cache_control.max_age = int(timedelta(minutes=1).total_seconds())
-    response.cache_control.public = True
-    return response
 
 
 @app.route("/api/leaderboard", methods=["GET"])
 def leaderboard():
     """
-    Return leaderboard data from stored cache (polled every 20 seconds).
-    Supports startTime and endTime query parameters for weekly leaderboards.
+    Fetch leaderboard data directly from Shuffle API on every request.
+    Supports startTime and endTime query parameters.
     Usernames are masked for privacy.
-    
-    If endTime is provided, it will be stored and used to stop counting wagers after that time.
     """
     global _leaderboard_end_time
     
@@ -194,53 +115,12 @@ def leaderboard():
         except (ValueError, OSError) as e:
             app.logger.warning(f"Invalid endTime format: {end_time}, error: {e}")
     
-    # Determine which data to return
-    with _data_lock:
-        if start_time and end_time:
-            # Weekly leaderboard - use time range as key
-            cache_key = f"{start_time}_{end_time}"
-            if cache_key not in _data_store["weekly"]:
-                # Fetch and cache this time range
-                try:
-                    weekly_data = fetch_leaderboard_data(start_time, end_time)
-                    _data_store["weekly"][cache_key] = weekly_data
-                    data = weekly_data
-                except Exception as e:
-                    app.logger.error(f"Error fetching weekly data: {e}")
-                    abort(502, description="Unable to fetch weekly leaderboard data")
-            else:
-                data = _data_store["weekly"][cache_key]
-        else:
-            # Lifetime data (from background polling)
-            # Always use endTime parameter when fetching to limit wagers to leaderboard period
-            with _end_time_lock:
-                end_time_str = None
-                if _leaderboard_end_time:
-                    end_time_str = str(int(_leaderboard_end_time.timestamp() * 1000))
-            
-            # Check cached data
-            with _data_lock:
-                cached_data = _data_store.get("lifetime", [])
-            
-            # Always fetch if no cached data, or if leaderboard has ended (to get final data)
-            if not cached_data or len(cached_data) == 0 or is_leaderboard_ended():
-                # Fetch fresh data with endTime to ensure we only count wagers up to end time
-                try:
-                    fresh_data = fetch_leaderboard_data(end_time=end_time_str)
-                    if fresh_data and len(fresh_data) > 0:
-                        with _data_lock:
-                            _data_store["lifetime"] = fresh_data
-                        data = fresh_data
-                    else:
-                        # If fetch returned empty, use cached data if available
-                        data = cached_data if cached_data else []
-                except Exception as e:
-                    app.logger.error(f"Error fetching leaderboard data: {e}", exc_info=True)
-                    # Use cached data as fallback, or empty array if no cache
-                    data = cached_data if cached_data else []
-            else:
-                # Use cached data
-                data = cached_data
+    # ALWAYS fetch directly from Shuffle API
+    try:
+        data = fetch_leaderboard_data(start_time=start_time, end_time=end_time)
+    except Exception as e:
+        app.logger.error(f"Error fetching leaderboard data: {e}", exc_info=True)
+        data = []
     
     # Ensure data is always a list
     if not isinstance(data, list):
@@ -267,21 +147,7 @@ def leaderboard():
     return jsonify(response_data)
 
 
-# Start background polling thread when app starts
-def start_background_polling():
-    """Start the background polling thread."""
-    thread = threading.Thread(target=poll_leaderboard_background, daemon=True)
-    thread.start()
-    app.logger.info("Background polling thread started")
-
-
 if __name__ == "__main__":
-    # Start background polling
-    start_background_polling()
-    
     port = int(os.environ.get("PORT", "8000"))
     app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG") == "1")
-else:
-    # For production deployments (e.g., gunicorn), start polling when module is imported
-    start_background_polling()
 
