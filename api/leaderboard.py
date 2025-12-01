@@ -75,16 +75,14 @@ def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[
             error_message = error_data.get('message', '')
             
             if error_message == 'TOO_MANY_REQUEST':
-                app.logger.warning("Rate limit exceeded: TOO_MANY_REQUEST")
-                # Try without params as fallback
-                return fetch_without_time_params()
+                app.logger.warning("Rate limit exceeded: TOO_MANY_REQUEST - API allows 1 request every 10 seconds")
+                return []  # Return empty - frontend will retry after delay
             elif error_message == 'REFEREES_NOT_FOUND':
                 app.logger.info("No referees found - returning empty array")
                 return []  # This is normal if user has no referees
             else:
                 app.logger.warning(f"API returned 400 error: {error_data}")
-                # Try fallback
-                return fetch_without_time_params()
+                return []  # Return empty - don't use fallback
         
         response.raise_for_status()
         payload = response.json()
@@ -99,29 +97,7 @@ def fetch_leaderboard_data(start_time: Optional[str] = None, end_time: Optional[
         
     except requests.RequestException as exc:
         app.logger.error(f"Failed to fetch upstream leaderboard: {exc}", exc_info=True)
-        # Try fallback without time params
-        return fetch_without_time_params()
-
-
-def fetch_without_time_params() -> List[Dict[str, Any]]:
-    """
-    Fallback: Fetch data without time parameters to get all data.
-    """
-    try:
-        app.logger.info(f"Fallback: Fetching from Shuffle API without time params: {API_URL}")
-        response = SESSION.get(API_URL, timeout=API_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-        
-        if not isinstance(payload, list):
-            app.logger.error(f"Unexpected payload format: {type(payload)}")
-            return []
-        
-        app.logger.info(f"Fallback: Successfully fetched {len(payload)} entries without time params")
-        return payload
-        
-    except requests.RequestException as exc:
-        app.logger.error(f"Fallback fetch also failed: {exc}", exc_info=True)
+        # Don't use fallback - user wants only exact time data
         return []
 
 
