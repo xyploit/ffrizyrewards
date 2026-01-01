@@ -4,39 +4,90 @@ document.addEventListener("DOMContentLoaded", () => {
     let refreshInterval = null;
     let leaderboardEnded = false;
 
+    // Helper to create Date from Eastern time components
+    function createEasternDate(year, month, day, hour, minute, second) {
+        // Eastern is UTC-5 (EST) or UTC-4 (EDT)
+        // Rough DST check: March (2) to November (10)
+        const isDST = month >= 2 && month <= 10;
+        const offsetHours = isDST ? 4 : 5;
+        
+        // If we want hour:minute:second Eastern, add offset to get UTC
+        return new Date(Date.UTC(year, month, day, hour + offsetHours, minute, second));
+    }
+    
+    // Calculate current month start and end in Eastern Time
+    function getMonthStartEastern() {
+        const now = new Date();
+        const formatter = new Intl.DateTimeFormat('en', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: 'numeric'
+        });
+        const parts = formatter.formatToParts(now);
+        const year = parseInt(parts.find(p => p.type === 'year').value);
+        const month = parseInt(parts.find(p => p.type === 'month').value) - 1;
+        
+        // First day of month at 00:00:00 Eastern
+        return createEasternDate(year, month, 1, 0, 0, 0);
+    }
+    
+    function getMonthEndEastern() {
+        const now = new Date();
+        const formatter = new Intl.DateTimeFormat('en', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: 'numeric'
+        });
+        const parts = formatter.formatToParts(now);
+        const year = parseInt(parts.find(p => p.type === 'year').value);
+        const month = parseInt(parts.find(p => p.type === 'month').value) - 1;
+        
+        // Last day of current month at 23:59:59 Eastern
+        const lastDay = new Date(year, month + 1, 0).getDate();
+        return createEasternDate(year, month, lastDay, 23, 59, 59);
+    }
+
     // Get URL parameters to check if viewing a specific day
     const urlParams = new URLSearchParams(window.location.search);
-    const dayParam = urlParams.get('day'); // e.g., ?day=1 for December 1st
+    const dayParam = urlParams.get('day');
 
-    // Default leaderboard period: December 1, 2025 to December 30, 2025
-    // Calculate exact millisecond timestamps like: startTime=1764591959590&endTime=1767139199000
-    const defaultStartDate = new Date(Date.UTC(2025, 11, 1, 0, 0, 0)); // December 1, 2025 00:00:00 UTC
-    const defaultStartTime = defaultStartDate.getTime(); // Milliseconds timestamp
+    // Default: Current month in Eastern time (from 1st of month to last day of month)
+    const monthStart = getMonthStartEastern();
+    const monthEnd = getMonthEndEastern();
+    const defaultStartTime = monthStart.getTime();
+    const defaultEndTime = monthEnd.getTime();
     
-    // End: December 30, 2025 at 23:59:59 UTC
-    const endDate = new Date(Date.UTC(2025, 11, 30, 23, 59, 59)); // December 30, 2025
-    const defaultEndTime = endDate.getTime(); // Milliseconds timestamp
-    
-    console.log(`Using timestamps: startTime=${defaultStartTime}, endTime=${defaultEndTime}`);
+    const startDateStr = monthStart.toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
+    const endDateStr = monthEnd.toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
+    console.log(`Using monthly leaderboard: ${startDateStr} to ${endDateStr} (Eastern Time)`);
+    console.log(`Timestamps: startTime=${defaultStartTime}, endTime=${defaultEndTime}`);
 
-    // If day parameter is provided (e.g., ?day=1), show data for that specific day
+    // If day parameter is provided, show data for that specific day
     let startTime, endTime;
     if (dayParam) {
         const day = parseInt(dayParam);
+        const formatter = new Intl.DateTimeFormat('en', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: 'numeric'
+        });
+        const parts = formatter.formatToParts(new Date());
+        const year = parseInt(parts.find(p => p.type === 'year').value);
+        const month = parseInt(parts.find(p => p.type === 'month').value) - 1;
+        
         if (day >= 1 && day <= 31) {
-            // Show data for specific day: December [day], 2025
-            const dayStart = new Date(Date.UTC(2025, 11, day, 0, 0, 0)); // December [day], 00:00:00
-            const dayEnd = new Date(Date.UTC(2025, 11, day, 23, 59, 59)); // December [day], 23:59:59
+            // Show data for specific day in current month
+            const dayStart = createEasternDate(year, month, day, 0, 0, 0);
+            const dayEnd = createEasternDate(year, month, day, 23, 59, 59);
             startTime = dayStart.getTime();
             endTime = dayEnd.getTime();
-            console.log(`Showing wagers for December ${day}, 2025`);
+            console.log(`Showing wagers for day ${day} of current month`);
         } else {
-            // Invalid day, use default (Dec 1-30)
             startTime = defaultStartTime;
             endTime = defaultEndTime;
         }
     } else {
-        // Default: Show wagers from December 1 to December 30 (resets to $0, only counts Dec 1-30)
+        // Default: Current month (from 1st to last day)
         startTime = defaultStartTime;
         endTime = defaultEndTime;
     }
@@ -60,7 +111,9 @@ document.addEventListener("DOMContentLoaded", () => {
         
         console.log(`[${new Date().toLocaleTimeString()}] Fetching fresh leaderboard data`);
         console.log(`URL: ${url.toString()}`);
-        console.log(`Timestamps: startTime=${startTime} (Dec 1, 2025), endTime=${endTime} (Dec 30, 2025)`);
+        const startDateDisplay = new Date(startTime).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
+        const endDateDisplay = new Date(endTime).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
+        console.log(`Timestamps: startTime=${startTime} (${startDateDisplay} ET), endTime=${endTime} (${endDateDisplay} ET)`);
 
         // Fetch with no cache for fresh data - always get latest
         fetch(url, { 
@@ -97,7 +150,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     data = [];
                 }
 
-                console.log(`✅ API returned ${data.length} entries (fresh data from Dec 1-30, 2025)`);
+                console.log(`✅ API returned ${data.length} entries (fresh monthly data)`);
                 
                 // Sort and display data (include entries with 0 wagerAmount too)
                 // Always show latest data - no caching
@@ -111,7 +164,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 // Log if no data
                 if (sorted.length === 0) {
                     console.warn("⚠️ No leaderboard data available. Possible reasons:");
-                    console.warn("1. No wagers in Dec 1-30, 2025 period");
+                    console.warn("1. No wagers in current month period");
                     console.warn("2. API rate limit (waiting 12+ seconds between requests)");
                     console.warn("3. No referees found");
                     console.warn("4. API temporarily unavailable");
